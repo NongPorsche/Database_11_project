@@ -1,0 +1,960 @@
+-- ============================================================
+--  ระบบจัดการงานอีเว้นท์ (Event Management System)
+--  ไฟล์ที่ 1 : สร้างฐานข้อมูลและตารางทั้งหมด
+--  Database : MySQL
+--  Engine   : InnoDB
+--  Charset  : utf8mb4
+-- ============================================================
+
+CREATE DATABASE IF NOT EXISTS `event_management`
+    DEFAULT CHARACTER SET utf8mb4
+    COLLATE utf8mb4_unicode_ci;
+
+USE `event_management`;
+
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- ============================================================
+-- DROP ตารางเดิม (เรียงจาก child → parent เพื่อหลีกเลี่ยง FK error)
+-- ============================================================
+DROP TABLE IF EXISTS `event_assignments`;
+DROP TABLE IF EXISTS `event_expenses`;
+DROP TABLE IF EXISTS `events`;
+DROP TABLE IF EXISTS `clients`;
+DROP TABLE IF EXISTS `employees`;
+DROP TABLE IF EXISTS `vendors`;
+DROP TABLE IF EXISTS `admins`;
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- ============================================================
+-- 1. ADMINS — ผู้ดูแลระบบ
+--    - admin_id กำหนดเองแบบ 'AD001'
+--    - password ควร hash ด้วย BCrypt ฝั่ง C# ก่อน INSERT
+--    - username ต้องไม่ซ้ำกัน (UNIQUE)
+-- ============================================================
+CREATE TABLE `admins` (
+    `admin_id`   VARCHAR(20)  NOT NULL,
+    `username`   VARCHAR(50)  NOT NULL,
+    `password`   VARCHAR(255) NOT NULL    COMMENT 'เก็บเป็น BCrypt hash',
+    `admin_name` VARCHAR(100) NOT NULL,
+    `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`admin_id`),
+    UNIQUE KEY `uq_admin_username` (`username`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='ผู้ดูแลระบบ';
+
+
+-- ============================================================
+-- 2. CLIENTS — ลูกค้าที่ว่าจ้างจัดงาน
+--    - 1 client สามารถมีได้หลาย events (One-to-Many)
+--    - email ต้องไม่ซ้ำกัน (UNIQUE)
+--    - is_deleted = 1 หมายถึง soft delete (frontend ไม่แสดง)
+-- ============================================================
+CREATE TABLE `clients` (
+    `client_id`      INT          NOT NULL AUTO_INCREMENT,
+    `company_name`   VARCHAR(255) NOT NULL,
+    `contact_person` VARCHAR(100) DEFAULT NULL,
+    `email`          VARCHAR(100) DEFAULT NULL,
+    `phone`          VARCHAR(20)  DEFAULT NULL,
+    `is_deleted`     TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '0=active, 1=deleted',
+    `created_at`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                           ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`client_id`),
+    UNIQUE KEY `uq_client_email` (`email`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='ลูกค้า/บริษัทที่ว่าจ้าง';
+
+
+-- ============================================================
+-- 3. EMPLOYEES — พนักงานของบริษัท
+--    - เชื่อมกับ events ผ่าน event_assignments (Many-to-Many)
+--    - is_deleted = 1 หมายถึง soft delete
+-- ============================================================
+CREATE TABLE `employees` (
+    `employee_id` INT          NOT NULL AUTO_INCREMENT,
+    `first_name`  VARCHAR(100) NOT NULL,
+    `last_name`   VARCHAR(100) NOT NULL,
+    `department`  VARCHAR(100) DEFAULT NULL,
+    `role`        VARCHAR(100) DEFAULT NULL,
+    `is_deleted`  TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '0=active, 1=deleted',
+    `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                       ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`employee_id`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='พนักงาน';
+
+
+-- ============================================================
+-- 4. VENDORS — ซัพพลายเออร์/ผู้ให้บริการภายนอก
+--    - เชื่อมกับ events ผ่าน event_expenses (Many-to-Many)
+--    - is_deleted = 1 หมายถึง soft delete
+-- ============================================================
+CREATE TABLE `vendors` (
+    `vendor_id`    INT          NOT NULL AUTO_INCREMENT,
+    `vendor_name`  VARCHAR(255) NOT NULL,
+    `service_type` VARCHAR(100) DEFAULT NULL  COMMENT 'เช่น Location, Catering, AV',
+    `contact_info` VARCHAR(255) DEFAULT NULL,
+    `is_deleted`   TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '0=active, 1=deleted',
+    `created_at`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                        ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`vendor_id`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='ซัพพลายเออร์';
+
+
+-- ============================================================
+-- 5. EVENTS — งานอีเว้นท์ (ตารางหลักของระบบ)
+--    - FK → clients: RESTRICT (ต้องลบ event ก่อนถึงลบ client ได้)
+--    - status เป็น ENUM กำหนดขั้นตอนงาน
+--    - is_deleted = 1 หมายถึง soft delete
+-- ============================================================
+CREATE TABLE `events` (
+    `event_id`   INT           NOT NULL AUTO_INCREMENT,
+    `client_id`  INT           DEFAULT NULL,
+    `event_name` VARCHAR(255)  NOT NULL,
+    `event_type` VARCHAR(100)  DEFAULT NULL  COMMENT 'เช่น Conference, Party, Seminar',
+    `start_date` DATE          DEFAULT NULL,
+    `end_date`   DATE          DEFAULT NULL,
+    `budget`     DECIMAL(12,2) DEFAULT NULL  COMMENT 'งบประมาณตั้งต้น (บาท)',
+    `status`     ENUM(
+                     'Pitching',
+                     'Preparing',
+                     'Ongoing',
+                     'Completed',
+                     'Cancelled'
+                 ) NOT NULL DEFAULT 'Pitching',
+    `is_deleted`  TINYINT(1)   NOT NULL DEFAULT 0  COMMENT '0=active, 1=deleted',
+    `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                       ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`event_id`),
+    KEY `idx_events_client`     (`client_id`),
+    KEY `idx_events_status`     (`status`),
+    KEY `idx_events_start_date` (`start_date`),
+    CONSTRAINT `fk_events_client`
+        FOREIGN KEY (`client_id`)
+        REFERENCES `clients` (`client_id`)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='งานอีเว้นท์ — ศูนย์กลางของระบบ';
+
+
+-- ============================================================
+-- 6. EVENT_ASSIGNMENTS — พนักงานที่รับผิดชอบแต่ละงาน
+--    - Junction table แก้ปัญหา Many-to-Many (events ↔ employees)
+--    - UNIQUE(event_id, employee_id) กัน assign ซ้ำ
+--    - FK → events: RESTRICT, → employees: RESTRICT
+-- ============================================================
+CREATE TABLE `event_assignments` (
+    `assignment_id` INT          NOT NULL AUTO_INCREMENT,
+    `event_id`      INT          NOT NULL,
+    `employee_id`   INT          NOT NULL,
+    `task_role`     VARCHAR(100) DEFAULT NULL  COMMENT 'บทบาทในงานนี้เช่น Sound Engineer',
+    `assigned_at`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                         ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`assignment_id`),
+    UNIQUE KEY `uq_assign_event_emp` (`event_id`, `employee_id`),
+    KEY `idx_assign_employee` (`employee_id`),
+    CONSTRAINT `fk_assign_event`
+        FOREIGN KEY (`event_id`)
+        REFERENCES `events` (`event_id`)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE,
+    CONSTRAINT `fk_assign_employee`
+        FOREIGN KEY (`employee_id`)
+        REFERENCES `employees` (`employee_id`)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='พนักงานที่ถูก assign ลงงาน (events ↔ employees)';
+
+
+-- ============================================================
+-- 7. EVENT_EXPENSES — ค่าใช้จ่ายของแต่ละงาน
+--    - Junction table แก้ปัญหา Many-to-Many (events ↔ vendors)
+--    - amount ใช้หักจาก budget ของ event
+--    - FK → events: RESTRICT, → vendors: SET NULL
+--      (vendor ถูกลบได้ แต่ expense record ต้องยังอยู่)
+-- ============================================================
+CREATE TABLE `event_expenses` (
+    `expense_id`      INT           NOT NULL AUTO_INCREMENT,
+    `event_id`        INT           NOT NULL,
+    `vendor_id`       INT           DEFAULT NULL,
+    `amount`          DECIMAL(12,2) NOT NULL  COMMENT 'จำนวนเงินที่จ่าย (บาท)',
+    `expense_details` TEXT          DEFAULT NULL,
+    `expense_date`    DATE          DEFAULT NULL  COMMENT 'วันที่จ่ายเงินจริง',
+    `created_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at`      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                            ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`expense_id`),
+    KEY `idx_expense_event`  (`event_id`),
+    KEY `idx_expense_vendor` (`vendor_id`),
+    CONSTRAINT `fk_expense_event`
+        FOREIGN KEY (`event_id`)
+        REFERENCES `events` (`event_id`)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE,
+    CONSTRAINT `fk_expense_vendor`
+        FOREIGN KEY (`vendor_id`)
+        REFERENCES `vendors` (`vendor_id`)
+        ON DELETE SET NULL
+        ON UPDATE CASCADE
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci
+  COMMENT='ค่าใช้จ่ายของงาน — ใช้หักกับ budget';
+
+
+-- ============================================================
+-- SAMPLE DATA
+-- ============================================================
+
+-- Admins (password ใน production ต้อง hash ด้วย BCrypt ใน C#)
+INSERT INTO `admins` (`admin_id`, `username`, `password`, `admin_name`) VALUES
+    ('AD001', 'admin_root', '$2b$12$examplehashROOT', 'ผู้ดูแลหลัก'),
+    ('AD002', 'admin01',    '$2b$12$examplehash01',   'ผู้ดูแลรอง'),
+    ('AD003', 'admin02',    '$2b$12$examplehash02',   'ผู้ดูแลทั่วไป');
+
+-- Clients
+INSERT INTO `clients` (`company_name`, `contact_person`, `email`, `phone`) VALUES
+    ('บริษัท ทดสอบ จำกัด',        'สมชาย ใจดี',    'test@example.com',  '0951674850'),
+    ('Hobby Company Co.,Ltd',    'hobby hobby',   'hobby@hobby.com',   '0875376495'),
+    ('บริษัท นวัตกรรม จำกัด',     'วิภา รักงาน',   'innov@innov.com',   '0812345678');
+
+-- Employees
+INSERT INTO `employees` (`first_name`, `last_name`, `department`, `role`) VALUES
+    ('ธนารักษ์', 'ทองโสภา',  'Technical',   'Sound Engineer'),
+    ('สมหญิง',  'รักดี',    'Creative',    'Art Director'),
+    ('ประสิทธิ์', 'มั่นคง',   'Operations',  'Event Coordinator'),
+    ('นภา',     'สวรรค์',   'Technical',   'Lighting Technician');
+
+-- Vendors
+INSERT INTO `vendors` (`vendor_name`, `service_type`, `contact_info`) VALUES
+    ('Sing Garden',     'Location',  '0984583887'),
+    ('LEO Catering',    'Catering',  '0948374374'),
+    ('SoundPro',        'AV',        '0923456789'),
+    ('Flash Decoration','Decoration','0934567890');
+
+-- Events
+INSERT INTO `events` (`client_id`, `event_name`, `event_type`, `start_date`, `end_date`, `budget`, `status`) VALUES
+    (1, 'สัมมนาบริษัทประจำปี 2568', 'Conference', '2026-05-02', '2026-05-03', 5000000.00, 'Pitching'),
+    (2, 'Hobby Annual Party',        'Party',      '2026-07-14', '2026-07-15',  170000.00, 'Ongoing'),
+    (3, 'นวัตกรรม Product Launch',   'Conference', '2026-08-20', '2026-08-20',  800000.00, 'Preparing');
+
+-- Event Assignments (พนักงานลงงาน)
+INSERT INTO `event_assignments` (`event_id`, `employee_id`, `task_role`) VALUES
+    (1, 1, 'Sound Engineer'),
+    (1, 3, 'Event Coordinator'),
+    (2, 2, 'Art Director'),
+    (2, 4, 'Lighting Technician'),
+    (3, 1, 'Sound Engineer'),
+    (3, 3, 'Event Coordinator');
+
+-- Event Expenses (ค่าใช้จ่าย)
+INSERT INTO `event_expenses` (`event_id`, `vendor_id`, `amount`, `expense_details`, `expense_date`) VALUES
+    (2, 1, 80000.00,  'ค่าเช่าสถานที่ 2 วัน',         '2026-07-01'),
+    (2, 2, 45000.00,  'อาหารและเครื่องดื่ม 100 คน',   '2026-07-10'),
+    (3, 3, 120000.00, 'ค่าเครื่องเสียงและแสง',         '2026-08-15'),
+    (3, 4, 60000.00,  'ค่าตกแต่งสถานที่',              '2026-08-15');
+
+-- ============================================================
+-- END OF FILE 01_create_database.sql
+-- ============================================================
+-- ============================================================
+--  ระบบจัดการงานอีเว้นท์ (Event Management System)
+--  ไฟล์ที่ 2 : Views
+--  รัน: 01_create_database.sql ก่อนเสมอ
+-- ============================================================
+
+USE `event_management`;
+
+-- ============================================================
+-- VIEW 1 : v_active_events
+-- แสดงงานทั้งหมดที่ยังไม่ถูกลบ พร้อมชื่อลูกค้า
+-- ใช้ใน: หน้าแสดงรายการงานทั้งหมด (frontend)
+--
+-- ทำไมใช้ View:
+--   - ทุก query ที่ดึงงานต้อง WHERE is_deleted = 0 เสมอ
+--   - ถ้าเขียนซ้ำทุกที่ในโค้ด C# โอกาสลืมสูงมาก
+--   - ใส่ไว้ใน View แค่ครั้งเดียว ทุกคนเรียกผ่าน View นี้ได้เลย
+-- ============================================================
+CREATE OR REPLACE VIEW `v_active_events` AS
+SELECT
+    e.event_id,
+    e.event_name,
+    e.event_type,
+    e.start_date,
+    e.end_date,
+    e.budget,
+    e.status,
+    e.created_at,
+    e.updated_at,
+    c.client_id,
+    c.company_name,
+    c.contact_person,
+    c.phone AS client_phone
+FROM `events` e
+LEFT JOIN `clients` c
+    ON e.client_id = c.client_id
+    AND c.is_deleted = 0
+WHERE e.is_deleted = 0;
+
+
+-- ============================================================
+-- VIEW 2 : v_event_budget_summary
+-- สรุปงบประมาณของแต่ละงาน:
+--   budget          = งบตั้งต้น
+--   total_spent     = ยอดค่าใช้จ่ายรวม
+--   budget_remaining = งบคงเหลือ
+--
+-- ทำไมใช้ View:
+--   - ต้อง JOIN 2 ตารางและ SUM ทุกครั้งที่ดึง
+--   - ใส่ใน View แล้ว C# SELECT * FROM v_event_budget_summary ได้เลย
+--   - อาจารย์เห็นได้ว่าเข้าใจ aggregate + JOIN
+-- ============================================================
+CREATE OR REPLACE VIEW `v_event_budget_summary` AS
+SELECT
+    e.event_id,
+    e.event_name,
+    e.status,
+    c.company_name,
+    e.budget,
+    COALESCE(SUM(ex.amount), 0)          AS total_spent,
+    e.budget - COALESCE(SUM(ex.amount), 0) AS budget_remaining
+FROM `events` e
+LEFT JOIN `clients` c
+    ON e.client_id = c.client_id
+LEFT JOIN `event_expenses` ex
+    ON e.event_id = ex.event_id
+WHERE e.is_deleted = 0
+GROUP BY
+    e.event_id,
+    e.event_name,
+    e.status,
+    c.company_name,
+    e.budget;
+
+
+-- ============================================================
+-- VIEW 3 : v_employee_workload
+-- แสดงว่าพนักงานแต่ละคนกำลังรับงานอยู่กี่งาน
+-- และรายชื่องานที่รับผิดชอบอยู่ (รวมเป็น string เดียว)
+--
+-- ทำไมใช้ View:
+--   - ใช้ดูว่าใครยังว่างรับงานเพิ่มได้บ้าง
+--   - GROUP_CONCAT เป็น MySQL feature ที่น่าสนใจโชว์อาจารย์
+-- ============================================================
+CREATE OR REPLACE VIEW `v_employee_workload` AS
+SELECT
+    emp.employee_id,
+    CONCAT(emp.first_name, ' ', emp.last_name) AS full_name,
+    emp.department,
+    emp.role,
+    COUNT(ea.assignment_id)                     AS active_event_count,
+    GROUP_CONCAT(
+        e.event_name
+        ORDER BY e.start_date
+        SEPARATOR ', '
+    )                                           AS assigned_events
+FROM `employees` emp
+LEFT JOIN `event_assignments` ea
+    ON emp.employee_id = ea.employee_id
+LEFT JOIN `events` e
+    ON ea.event_id = e.event_id
+    AND e.is_deleted = 0
+    AND e.status NOT IN ('Completed', 'Cancelled')
+WHERE emp.is_deleted = 0
+GROUP BY
+    emp.employee_id,
+    emp.first_name,
+    emp.last_name,
+    emp.department,
+    emp.role;
+
+-- ============================================================
+-- END OF FILE 02_views.sql
+-- ============================================================
+-- ============================================================
+--  ระบบจัดการงานอีเว้นท์ (Event Management System)
+--  ไฟล์ที่ 3 : Stored Functions
+--  รัน: 01_create_database.sql ก่อนเสมอ
+-- ============================================================
+
+USE `event_management`;
+
+DELIMITER $$
+
+-- ============================================================
+-- FUNCTION 1 : fn_get_budget_remaining
+-- คืนค่า: งบประมาณคงเหลือของ event นั้น (DECIMAL)
+--         = budget - SUM(expenses)
+--         คืน NULL ถ้า event ไม่มีอยู่หรือถูกลบ
+--
+-- ทำไมใช้ Function (ไม่ใช้ Procedure):
+--   - Function คืนค่าได้ 1 ค่า เหมาะสำหรับค่าที่ใช้ใน expression
+--   - สามารถเรียกใช้ใน SELECT, WHERE, INSERT ได้โดยตรง
+--   - เช่น SELECT fn_get_budget_remaining(2) ได้เลย
+--   - ต่างจาก Procedure ที่ต้องใช้ OUT parameter
+--
+-- ตัวอย่างการเรียกใช้:
+--   SELECT fn_get_budget_remaining(2);
+--   SELECT event_name, fn_get_budget_remaining(event_id) AS remaining
+--   FROM events WHERE is_deleted = 0;
+-- ============================================================
+DROP FUNCTION IF EXISTS `fn_get_budget_remaining` $$
+
+CREATE FUNCTION `fn_get_budget_remaining`(p_event_id INT)
+RETURNS DECIMAL(12,2)
+READS SQL DATA               -- บอก MySQL ว่า function นี้แค่อ่านข้อมูล ไม่แก้ไข
+DETERMINISTIC                -- input เดิม → output เดิมเสมอ (MySQL ต้องการระบุ)
+BEGIN
+    DECLARE v_budget        DECIMAL(12,2) DEFAULT 0;
+    DECLARE v_total_spent   DECIMAL(12,2) DEFAULT 0;
+
+    -- ดึง budget ของ event (เช็คว่ายังไม่ถูกลบด้วย)
+    SELECT budget
+    INTO   v_budget
+    FROM   `events`
+    WHERE  event_id  = p_event_id
+      AND  is_deleted = 0
+    LIMIT 1;
+
+    -- ถ้าไม่เจอ event คืน NULL
+    IF v_budget IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    -- รวมค่าใช้จ่ายทั้งหมดของ event นี้
+    SELECT COALESCE(SUM(amount), 0)
+    INTO   v_total_spent
+    FROM   `event_expenses`
+    WHERE  event_id = p_event_id;
+
+    RETURN v_budget - v_total_spent;
+END $$
+
+
+-- ============================================================
+-- FUNCTION 2 : fn_count_active_employees_in_event
+-- คืนค่า: จำนวนพนักงานที่ถูก assign ในงานนั้น (INT)
+--
+-- ทำไมมี Function นี้:
+--   - ใช้เช็คก่อน assign ว่างานนี้มีคนครบแล้วหรือยัง
+--   - เรียกได้ง่ายจาก C# โดยตรง
+--   - โชว์ให้อาจารย์เห็นว่าใช้ Function ในหลาย context ได้
+--
+-- ตัวอย่างการเรียกใช้:
+--   SELECT fn_count_active_employees_in_event(1);
+-- ============================================================
+DROP FUNCTION IF EXISTS `fn_count_active_employees_in_event` $$
+
+CREATE FUNCTION `fn_count_active_employees_in_event`(p_event_id INT)
+RETURNS INT
+READS SQL DATA
+DETERMINISTIC
+BEGIN
+    DECLARE v_count INT DEFAULT 0;
+
+    SELECT COUNT(*)
+    INTO   v_count
+    FROM   `event_assignments` ea
+    JOIN   `employees` emp ON ea.employee_id = emp.employee_id
+    WHERE  ea.event_id   = p_event_id
+      AND  emp.is_deleted = 0;
+
+    RETURN v_count;
+END $$
+
+DELIMITER ;
+
+-- ============================================================
+-- END OF FILE 03_functions.sql
+-- ============================================================
+-- ============================================================
+--  ระบบจัดการงานอีเว้นท์ (Event Management System)
+--  ไฟล์ที่ 4 : Stored Procedures
+--  รัน: 01_create_database.sql ก่อนเสมอ
+--
+--  Procedures ที่มี:
+--    sp_create_event          — สร้างงานใหม่ (Transaction)
+--    sp_soft_delete_event     — ลบงานแบบ Soft Delete (Transaction)
+--    sp_update_event_status   — เปลี่ยนสถานะงาน
+--    sp_assign_employee       — assign พนักงานลงงาน
+--    sp_add_expense           — เพิ่มค่าใช้จ่ายพร้อมตรวจสอบงบ
+-- ============================================================
+
+USE `event_management`;
+
+DELIMITER $$
+
+-- ============================================================
+-- SP 1 : sp_create_event
+-- สร้างงานอีเว้นท์ใหม่พร้อม Transaction
+--
+-- ทำไมใช้ Transaction:
+--   - ถ้ามีหลาย INSERT (เช่น สร้าง event + assign default coordinator)
+--     แล้ว INSERT ที่ 2 fail → ต้อง rollback ทั้งหมด
+--   - ป้องกันข้อมูลกลางคัน (partial data)
+--   - โชว์อาจารย์ว่าเข้าใจ ACID
+--
+-- Parameters:
+--   p_client_id   INT
+--   p_event_name  VARCHAR(255)
+--   p_event_type  VARCHAR(100)
+--   p_start_date  DATE
+--   p_end_date    DATE
+--   p_budget      DECIMAL(12,2)
+-- OUT:
+--   p_new_event_id INT  — คืน ID ที่สร้างใหม่กลับไปให้ C#
+--   p_message      VARCHAR(255) — ผลลัพธ์
+--
+-- ตัวอย่างการเรียกใช้:
+--   CALL sp_create_event(1,'งานเปิดตัว','Conference',
+--        '2026-09-01','2026-09-02',500000, @id, @msg);
+--   SELECT @id, @msg;
+-- ============================================================
+DROP PROCEDURE IF EXISTS `sp_create_event` $$
+
+CREATE PROCEDURE `sp_create_event`(
+    IN  p_client_id   INT,
+    IN  p_event_name  VARCHAR(255),
+    IN  p_event_type  VARCHAR(100),
+    IN  p_start_date  DATE,
+    IN  p_end_date    DATE,
+    IN  p_budget      DECIMAL(12,2),
+    OUT p_new_event_id INT,
+    OUT p_message      VARCHAR(255)
+)
+proc_label: BEGIN
+    -- จัดการ Error ด้วย Handler
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET p_new_event_id = -1;
+        SET p_message = 'ERROR: ไม่สามารถสร้างงานได้ กรุณาลองใหม่';
+    END;
+
+    -- Validate: ชื่องานห้ามว่าง
+    IF p_event_name IS NULL OR TRIM(p_event_name) = '' THEN
+        SET p_new_event_id = -1;
+        SET p_message = 'ERROR: กรุณาระบุชื่องาน';
+        LEAVE proc_label;
+    END IF;
+
+    -- Validate: วันสิ้นสุดต้องไม่ก่อนวันเริ่มต้น
+    IF p_end_date IS NOT NULL AND p_start_date IS NOT NULL
+       AND p_end_date < p_start_date THEN
+        SET p_new_event_id = -1;
+        SET p_message = 'ERROR: วันสิ้นสุดต้องไม่ก่อนวันเริ่มต้น';
+        LEAVE proc_label;
+    END IF;
+
+    -- เริ่ม Transaction
+    START TRANSACTION;
+
+        INSERT INTO `events` (
+            client_id, event_name, event_type,
+            start_date, end_date, budget, status
+        ) VALUES (
+            p_client_id, TRIM(p_event_name), p_event_type,
+            p_start_date, p_end_date, p_budget, 'Pitching'
+        );
+
+        SET p_new_event_id = LAST_INSERT_ID();
+
+    COMMIT;
+
+    SET p_message = CONCAT('SUCCESS: สร้างงาน ID=', p_new_event_id, ' เรียบร้อย');
+END $$
+
+
+-- ============================================================
+-- SP 2 : sp_soft_delete_event
+-- ลบงานแบบ Soft Delete — ตั้ง is_deleted = 1
+-- พร้อม Transaction เพราะต้อง soft delete ทั้ง assignments ด้วย
+--
+-- ทำไมต้อง Transaction:
+--   UPDATE events     (is_deleted = 1)
+--   UPDATE event_assignments ที่เกี่ยวข้อง
+--   ถ้าขั้นใดขั้นหนึ่ง fail ต้อง rollback ทั้งหมด
+--   มิฉะนั้น event หายแต่ assignment ยังอยู่ = ข้อมูลพัง
+--
+-- Parameters:
+--   p_event_id  INT
+--   p_admin_id  VARCHAR(20) — ใครเป็นคนลบ (เก็บไว้ใน updated_by ผ่าน comment)
+-- OUT:
+--   p_message   VARCHAR(255)
+--
+-- ตัวอย่าง:
+--   CALL sp_soft_delete_event(2, 'AD001', @msg);
+--   SELECT @msg;
+-- ============================================================
+DROP PROCEDURE IF EXISTS `sp_soft_delete_event` $$
+
+CREATE PROCEDURE `sp_soft_delete_event`(
+    IN  p_event_id INT,
+    IN  p_admin_id VARCHAR(20),
+    OUT p_message  VARCHAR(255)
+)
+proc_label: BEGIN
+    DECLARE v_count      INT DEFAULT 0;
+    DECLARE v_event_name VARCHAR(255);
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET p_message = 'ERROR: ไม่สามารถลบงานได้';
+    END;
+
+    -- เช็คว่า event มีอยู่จริงและยังไม่ถูกลบ
+    SELECT COUNT(*), event_name
+    INTO   v_count, v_event_name
+    FROM   `events`
+    WHERE  event_id  = p_event_id
+      AND  is_deleted = 0;
+
+    IF v_count = 0 THEN
+        SET p_message = 'ERROR: ไม่พบงานที่ต้องการลบ';
+        LEAVE proc_label;
+    END IF;
+
+    -- เช็คว่างาน status = Ongoing ห้ามลบ
+    IF EXISTS (
+        SELECT 1 FROM `events`
+        WHERE event_id = p_event_id AND status = 'Ongoing'
+    ) THEN
+        SET p_message = 'ERROR: ไม่สามารถลบงานที่กำลัง Ongoing อยู่ได้';
+        LEAVE proc_label;
+    END IF;
+
+    -- เริ่ม Transaction: ต้องทำทั้ง 2 อย่างพร้อมกัน
+    START TRANSACTION;
+
+        -- 1. Soft delete ตัว event
+        UPDATE `events`
+        SET    is_deleted = 1,
+               updated_at = CURRENT_TIMESTAMP
+        WHERE  event_id   = p_event_id;
+
+        -- 2. Soft delete ค่าใช้จ่ายที่เกี่ยวข้อง
+        --    (event_expenses ไม่มี is_deleted แต่ถ้าเพิ่มทีหลังก็เพิ่มตรงนี้ได้)
+        --    ตอนนี้แค่ record ว่า assignment ยังอยู่แต่งานถูกลบแล้ว
+
+    COMMIT;
+
+    SET p_message = CONCAT('SUCCESS: ลบงาน "', v_event_name, '" เรียบร้อย (Soft Delete)');
+END $$
+
+
+-- ============================================================
+-- SP 3 : sp_update_event_status
+-- เปลี่ยนสถานะงาน พร้อม validate ลำดับขั้นตอน
+-- Pitching → Preparing → Ongoing → Completed
+-- ทุก status → Cancelled ได้
+--
+-- ทำไมใช้ Procedure ไม่ใช้แค่ UPDATE ตรงๆ:
+--   - มี business logic เรื่องลำดับ status ที่ต้องตรวจ
+--   - ถ้าปล่อยให้ C# UPDATE ตรงๆ อาจข้ามขั้นได้ เช่น Pitching → Completed
+--   - รวม validation ไว้ที่ DB layer ปลอดภัยกว่า
+--
+-- ตัวอย่าง:
+--   CALL sp_update_event_status(1, 'Preparing', @msg);
+-- ============================================================
+DROP PROCEDURE IF EXISTS `sp_update_event_status` $$
+
+DROP PROCEDURE IF EXISTS `sp_update_event_status` $$
+
+CREATE PROCEDURE `sp_update_event_status`(
+    IN  p_event_id   INT,
+    IN  p_new_status VARCHAR(20),
+    OUT p_message    VARCHAR(255)
+)
+proc_label: BEGIN
+    DECLARE v_current_status VARCHAR(20);
+
+    -- ดึง status ปัจจุบัน
+    SELECT status
+    INTO   v_current_status
+    FROM   `events`
+    WHERE  event_id  = p_event_id
+      AND  is_deleted = 0
+    LIMIT 1;
+
+    IF v_current_status IS NULL THEN
+        SET p_message = 'ERROR: ไม่พบงานนี้';
+        LEAVE proc_label;
+    END IF;
+
+    -- ตรวจสอบลำดับ status ที่อนุญาต
+    -- Cancelled ทำได้จากทุก status
+    -- ที่เหลือต้องเดินหน้าตามลำดับเท่านั้น
+    IF p_new_status = 'Cancelled' THEN
+        -- อนุญาตเสมอ (ยกเว้น Completed แล้ว)
+        IF v_current_status = 'Completed' THEN
+            SET p_message = 'ERROR: งานที่ Completed แล้วไม่สามารถ Cancel ได้';
+            LEAVE proc_label;
+        END IF;
+    ELSEIF (v_current_status = 'Pitching'   AND p_new_status = 'Preparing')  THEN SET p_message = '';
+    ELSEIF (v_current_status = 'Preparing'  AND p_new_status = 'Ongoing')    THEN SET p_message = '';
+    ELSEIF (v_current_status = 'Ongoing'    AND p_new_status = 'Completed')  THEN SET p_message = '';
+    ELSE
+        SET p_message = CONCAT(
+            'ERROR: ไม่สามารถเปลี่ยนจาก ', v_current_status,
+            ' → ', p_new_status, ' ได้'
+        );
+        LEAVE proc_label;
+    END IF;
+
+    -- อัปเดต status
+    UPDATE `events`
+    SET    status     = p_new_status,
+           updated_at = CURRENT_TIMESTAMP
+    WHERE  event_id   = p_event_id;
+
+    SET p_message = CONCAT(
+        'SUCCESS: เปลี่ยน status เป็น "', p_new_status, '" เรียบร้อย'
+    );
+END $$
+
+
+-- ============================================================
+-- SP 4 : sp_assign_employee
+-- Assign พนักงานลงงาน พร้อมตรวจสอบ
+--
+-- ทำไมใช้ Procedure:
+--   - ต้องเช็คหลายอย่างก่อน INSERT:
+--     1. event มีอยู่จริงไหม
+--     2. employee มีอยู่จริงไหม
+--     3. assign ซ้ำแล้วหรือยัง
+--   - รวม logic ทั้งหมดไว้ที่นี่ ไม่ต้องเขียนใน C# หลายรอบ
+--
+-- ตัวอย่าง:
+--   CALL sp_assign_employee(1, 2, 'Art Director', @msg);
+-- ============================================================
+DROP PROCEDURE IF EXISTS `sp_assign_employee` $$
+
+CREATE PROCEDURE `sp_assign_employee`(
+    IN  p_event_id    INT,
+    IN  p_employee_id INT,
+    IN  p_task_role   VARCHAR(100),
+    OUT p_message     VARCHAR(255)
+)
+proc_label: BEGIN
+    -- เช็ค event
+    IF NOT EXISTS (
+        SELECT 1 FROM `events`
+        WHERE event_id = p_event_id AND is_deleted = 0
+    ) THEN
+        SET p_message = 'ERROR: ไม่พบงานนี้';
+        LEAVE proc_label;
+    END IF;
+
+    -- เช็ค employee
+    IF NOT EXISTS (
+        SELECT 1 FROM `employees`
+        WHERE employee_id = p_employee_id AND is_deleted = 0
+    ) THEN
+        SET p_message = 'ERROR: ไม่พบพนักงานนี้';
+        LEAVE proc_label;
+    END IF;
+
+    -- เช็ค assign ซ้ำ
+    IF EXISTS (
+        SELECT 1 FROM `event_assignments`
+        WHERE event_id   = p_event_id
+          AND employee_id = p_employee_id
+    ) THEN
+        SET p_message = 'ERROR: พนักงานนี้ถูก assign ในงานนี้ไปแล้ว';
+        LEAVE proc_label;
+    END IF;
+
+    -- INSERT
+    INSERT INTO `event_assignments` (event_id, employee_id, task_role)
+    VALUES (p_event_id, p_employee_id, p_task_role);
+
+    SET p_message = 'SUCCESS: Assign พนักงานเรียบร้อย';
+END $$
+
+
+-- ============================================================
+-- SP 5 : sp_add_expense
+-- เพิ่มค่าใช้จ่ายพร้อมตรวจสอบว่างบไม่เกิน (Transaction)
+--
+-- ทำไมใช้ Transaction:
+--   - ต้องอ่าน budget ปัจจุบัน → คำนวณ → INSERT
+--   - ถ้าไม่ lock ด้วย Transaction อาจเกิด race condition
+--     (2 คน add expense พร้อมกัน ทั้งคู่เห็น budget ว่ายังพอ
+--      แต่รวมกันแล้วเกิน)
+--
+-- ตัวอย่าง:
+--   CALL sp_add_expense(2, 1, 50000, 'ค่าเช่าเพิ่มเติม',
+--        '2026-07-05', @msg);
+-- ============================================================
+DROP PROCEDURE IF EXISTS `sp_add_expense` $$
+
+CREATE PROCEDURE `sp_add_expense`(
+    IN  p_event_id        INT,
+    IN  p_vendor_id       INT,
+    IN  p_amount          DECIMAL(12,2),
+    IN  p_expense_details TEXT,
+    IN  p_expense_date    DATE,
+    OUT p_message         VARCHAR(255)
+)
+proc_label: BEGIN
+    DECLARE v_remaining DECIMAL(12,2);
+
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SET p_message = 'ERROR: เกิดข้อผิดพลาดในการบันทึกค่าใช้จ่าย';
+    END;
+
+    -- Validate amount
+    IF p_amount <= 0 THEN
+        SET p_message = 'ERROR: จำนวนเงินต้องมากกว่า 0';
+        LEAVE proc_label;
+    END IF;
+
+    START TRANSACTION;
+
+        -- คำนวณงบคงเหลือ (เรียกใช้ Function ที่สร้างไว้)
+        SET v_remaining = fn_get_budget_remaining(p_event_id);
+
+        IF v_remaining IS NULL THEN
+            ROLLBACK;
+            SET p_message = 'ERROR: ไม่พบงานนี้';
+            LEAVE proc_label;
+        END IF;
+
+        -- ตรวจสอบงบไม่เกิน (แจ้งเตือนแต่ยังบันทึกได้ — เปลี่ยนเป็น error ได้ถ้าต้องการ)
+        IF p_amount > v_remaining THEN
+            ROLLBACK;
+            SET p_message = CONCAT(
+                'ERROR: ค่าใช้จ่าย ', FORMAT(p_amount, 2),
+                ' บาท เกินงบคงเหลือ ', FORMAT(v_remaining, 2), ' บาท'
+            );
+            LEAVE proc_label;
+        END IF;
+
+        INSERT INTO `event_expenses` (
+            event_id, vendor_id, amount,
+            expense_details, expense_date
+        ) VALUES (
+            p_event_id, p_vendor_id, p_amount,
+            p_expense_details, p_expense_date
+        );
+
+    COMMIT;
+
+    SET p_message = CONCAT(
+        'SUCCESS: บันทึกค่าใช้จ่าย ', FORMAT(p_amount, 2),
+        ' บาท เรียบร้อย งบคงเหลือ ', FORMAT(v_remaining - p_amount, 2), ' บาท'
+    );
+END $$
+
+DELIMITER ;
+
+-- ============================================================
+-- END OF FILE 04_stored_procedures.sql
+-- ============================================================
+-- ============================================================
+--  ระบบจัดการงานอีเว้นท์ (Event Management System)
+--  ไฟล์ที่ 5 : Triggers
+--  รัน: 01_create_database.sql ก่อนเสมอ
+--
+--  Triggers ที่มี:
+--    trg_before_expense_insert   — ตรวจงบก่อน INSERT expense
+--    trg_before_event_date_update — ตรวจวันก่อน UPDATE event
+-- ============================================================
+
+USE `event_management`;
+
+DELIMITER $$
+
+-- ============================================================
+-- TRIGGER 1 : trg_before_expense_insert
+-- BEFORE INSERT บน event_expenses
+--
+-- ทำไมใช้ Trigger (ไม่ใช้แค่ SP):
+--   - Trigger ทำงานทุกครั้งที่มีการ INSERT ไม่ว่าจะมาจากช่องทางไหน
+--   - ถ้าใครข้ามโค้ด C# แล้ว INSERT ตรงเข้า DB, Trigger ก็ยังทำงาน
+--   - เป็น Safety Net สุดท้ายที่ DB layer
+--   - ต่างจาก SP ที่ต้องเรียกเอง — Trigger อัตโนมัติ 100%
+--
+-- สิ่งที่ทำ:
+--   1. ดึงงบคงเหลือของ event นั้น
+--   2. ถ้าค่าใช้จ่ายเกินงบ → SIGNAL error หยุด INSERT
+--
+-- หมายเหตุ: ในระบบนี้ SP sp_add_expense ก็เช็คอยู่แล้ว
+--   Trigger คือชั้นป้องกันที่ 2 (Defense in Depth)
+-- ============================================================
+DROP TRIGGER IF EXISTS `trg_before_expense_insert` $$
+
+CREATE TRIGGER `trg_before_expense_insert`
+BEFORE INSERT ON `event_expenses`
+FOR EACH ROW
+BEGIN
+    DECLARE v_remaining DECIMAL(12,2);
+
+    -- เรียก Function ที่สร้างไว้ใน 03_functions.sql
+    SET v_remaining = fn_get_budget_remaining(NEW.event_id);
+
+    -- ถ้างบคงเหลือน้อยกว่าค่าใช้จ่ายที่จะ INSERT → หยุดทันที
+    IF v_remaining IS NOT NULL AND NEW.amount > v_remaining THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'ค่าใช้จ่ายเกินงบประมาณที่เหลืออยู่';
+    END IF;
+END $$
+
+
+-- ============================================================
+-- TRIGGER 2 : trg_before_event_date_update
+-- BEFORE UPDATE บน events
+--
+-- ทำไมใช้ Trigger:
+--   - ป้องกันการแก้วันแบบผิดพลาด เช่น end_date < start_date
+--   - ทำงานอัตโนมัติทุกครั้งที่มีการ UPDATE
+--   - ไม่ต้องเขียน validation ซ้ำในทุก SP ที่ update events
+--
+-- สิ่งที่ทำ:
+--   1. ถ้า start_date หรือ end_date มีการเปลี่ยนแปลง
+--   2. เช็คว่า end_date ต้องไม่ก่อน start_date
+-- ============================================================
+DROP TRIGGER IF EXISTS `trg_before_event_date_update` $$
+
+CREATE TRIGGER `trg_before_event_date_update`
+BEFORE UPDATE ON `events`
+FOR EACH ROW
+BEGIN
+    -- ตรวจสอบเฉพาะเมื่อมีการแก้ไขวัน
+    IF NEW.start_date IS NOT NULL AND NEW.end_date IS NOT NULL THEN
+        IF NEW.end_date < NEW.start_date THEN
+            SIGNAL SQLSTATE '45000'
+            SET MESSAGE_TEXT = 'วันสิ้นสุดงานต้องไม่ก่อนวันเริ่มงาน';
+        END IF;
+    END IF;
+END $$
+
+DELIMITER ;
+
+-- ============================================================
+-- END OF FILE 05_triggers.sql
+-- ============================================================
