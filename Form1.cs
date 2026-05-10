@@ -47,7 +47,7 @@ namespace event_management_app
         Color gridLineColor = Color.FromArgb(55, 55, 70);
 
         // ⚠️ แก้รหัสผ่าน Database ให้ตรงกับเครื่องคุณ
-        string connectionString = "server=localhost;user=root;database=event_management;port=3306;password=710254810Rov#;";
+        string connectionString = "server=localhost;user=root;database=event_management;port=3306;password=******;";
 
         public Form1()
         {
